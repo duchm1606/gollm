@@ -1,1 +1,30 @@
+# Internal reference materials (large, not for commit)
 .docs
+
+# Large data files - uncomment if you have large corpora
+# data/corpus/*.txt
+# data/tokenizers/*.model
+
+# Keep directory structure
+!data/corpus/.gitkeep
+!data/tokenizers/.gitkeep
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+tokcli
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test outputs
+*.test
+*.out
