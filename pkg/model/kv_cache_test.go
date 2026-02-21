@@ -10,11 +10,11 @@ import (
 // with pre-allocated tensors of the correct shape.
 func TestNewKVCache_Preallocation(t *testing.T) {
 	batchSize := 2
-	numKVGroups := 4
+	numHeads := 12
 	maxLength := 100
 	headDim := 64
 
-	cache := NewKVCache(batchSize, numKVGroups, maxLength, headDim)
+	cache := NewKVCache(batchSize, numHeads, maxLength, headDim)
 
 	// Verify cache is initialized correctly
 	if cache == nil {
@@ -30,7 +30,7 @@ func TestNewKVCache_Preallocation(t *testing.T) {
 	}
 
 	// Verify K tensor shape
-	expectedShape := []int{batchSize, numKVGroups, maxLength, headDim}
+	expectedShape := []int{batchSize, numHeads, maxLength, headDim}
 	if len(cache.K.Shape) != len(expectedShape) {
 		t.Errorf("K shape length mismatch: expected %v, got %v", expectedShape, cache.K.Shape)
 	}
@@ -207,19 +207,19 @@ func TestUpdate_CacheOverflow(t *testing.T) {
 // at once and with batch size > 1.
 func TestUpdate_BatchAndMultipleTokens(t *testing.T) {
 	batchSize := 2
-	numKVGroups := 4
+	numHeads := 4
 	maxLength := 20
 	headDim := 32
-	cache := NewKVCache(batchSize, numKVGroups, maxLength, headDim)
+	cache := NewKVCache(batchSize, numHeads, maxLength, headDim)
 
 	// Append 3 tokens at once
 	newTokens := 3
-	newK := tensor.NewTensor([]int{batchSize, numKVGroups, newTokens, headDim})
-	newV := tensor.NewTensor([]int{batchSize, numKVGroups, newTokens, headDim})
+	newK := tensor.NewTensor([]int{batchSize, numHeads, newTokens, headDim})
+	newV := tensor.NewTensor([]int{batchSize, numHeads, newTokens, headDim})
 
 	// Fill with test values
 	for b := 0; b < batchSize; b++ {
-		for g := 0; g < numKVGroups; g++ {
+		for g := 0; g < numHeads; g++ {
 			for tok := 0; tok < newTokens; tok++ {
 				for d := 0; d < headDim; d++ {
 					val := float32(b*10000 + g*1000 + tok*100 + d)
@@ -247,7 +247,7 @@ func TestUpdate_BatchAndMultipleTokens(t *testing.T) {
 
 	// Verify all values were copied
 	for b := 0; b < batchSize; b++ {
-		for g := 0; g < numKVGroups; g++ {
+		for g := 0; g < numHeads; g++ {
 			for tok := 0; tok < newTokens; tok++ {
 				for d := 0; d < headDim; d++ {
 					expectedK := float32(b*10000 + g*1000 + tok*100 + d)
@@ -267,8 +267,8 @@ func TestUpdate_BatchAndMultipleTokens(t *testing.T) {
 	}
 
 	// Append 2 more tokens
-	newK2 := tensor.NewTensor([]int{batchSize, numKVGroups, 2, headDim})
-	newV2 := tensor.NewTensor([]int{batchSize, numKVGroups, 2, headDim})
+	newK2 := tensor.NewTensor([]int{batchSize, numHeads, 2, headDim})
+	newV2 := tensor.NewTensor([]int{batchSize, numHeads, 2, headDim})
 
 	cachedK2, _, err := cache.Update(newK2, newV2)
 	if err != nil {
@@ -352,13 +352,13 @@ func TestGetMaxLength(t *testing.T) {
 // TestGetCacheSize verifies cache size calculation.
 func TestGetCacheSize(t *testing.T) {
 	batchSize := 2
-	numKVGroups := 4
+	numHeads := 4
 	maxLength := 100
 	headDim := 64
-	cache := NewKVCache(batchSize, numKVGroups, maxLength, headDim)
+	cache := NewKVCache(batchSize, numHeads, maxLength, headDim)
 
-	// Calculate expected size: batch * groups * length * head_dim * 2 (K+V) * 4 bytes
-	elements := batchSize * numKVGroups * maxLength * headDim
+	// Calculate expected size: batch * heads * length * head_dim * 2 (K+V) * 4 bytes
+	elements := batchSize * numHeads * maxLength * headDim
 	expectedBytes := elements * 2 * 4
 
 	if cache.GetCacheSize() != expectedBytes {
@@ -378,12 +378,12 @@ func TestUpdate_ShapeMismatch(t *testing.T) {
 		t.Error("Expected error for batch size mismatch")
 	}
 
-	// Test wrong num_kv_groups
-	wrongGroupsK := tensor.NewTensor([]int{2, 2, 1, 64})
-	wrongGroupsV := tensor.NewTensor([]int{2, 2, 1, 64})
-	_, _, err = cache.Update(wrongGroupsK, wrongGroupsV)
+	// Test wrong num_heads
+	wrongHeadsK := tensor.NewTensor([]int{2, 2, 1, 64})
+	wrongHeadsV := tensor.NewTensor([]int{2, 2, 1, 64})
+	_, _, err = cache.Update(wrongHeadsK, wrongHeadsV)
 	if err == nil {
-		t.Error("Expected error for num_kv_groups mismatch")
+		t.Error("Expected error for num_heads mismatch")
 	}
 
 	// Test wrong head_dim
@@ -506,23 +506,23 @@ func TestCacheReuse(t *testing.T) {
 // TestCacheMemoryLayout verifies the internal memory layout is correct.
 func TestCacheMemoryLayout(t *testing.T) {
 	batchSize := 1
-	numKVGroups := 2
+	numHeads := 2
 	maxLength := 4
 	headDim := 3
-	cache := NewKVCache(batchSize, numKVGroups, maxLength, headDim)
+	cache := NewKVCache(batchSize, numHeads, maxLength, headDim)
 
 	// Add tokens with predictable values
-	// Token 0: values are 100 + group*10 + dim
-	// Token 1: values are 200 + group*10 + dim
+	// Token 0: values are 100 + head*10 + dim
+	// Token 1: values are 200 + head*10 + dim
 	for tokenIdx := 0; tokenIdx < 2; tokenIdx++ {
-		newK := tensor.NewTensor([]int{batchSize, numKVGroups, 1, headDim})
-		newV := tensor.NewTensor([]int{batchSize, numKVGroups, 1, headDim})
+		newK := tensor.NewTensor([]int{batchSize, numHeads, 1, headDim})
+		newV := tensor.NewTensor([]int{batchSize, numHeads, 1, headDim})
 
-		for g := 0; g < numKVGroups; g++ {
+		for h := 0; h < numHeads; h++ {
 			for d := 0; d < headDim; d++ {
-				val := float32((tokenIdx+1)*100 + g*10 + d)
-				newK.Set([]int{0, g, 0, d}, val)
-				newV.Set([]int{0, g, 0, d}, val+1000)
+				val := float32((tokenIdx+1)*100 + h*10 + d)
+				newK.Set([]int{0, h, 0, d}, val)
+				newV.Set([]int{0, h, 0, d}, val+1000)
 			}
 		}
 
@@ -531,35 +531,35 @@ func TestCacheMemoryLayout(t *testing.T) {
 
 	// Verify internal cache layout by checking the full cache tensor
 	// Token 0 should be at position 0
-	for g := 0; g < numKVGroups; g++ {
+	for h := 0; h < numHeads; h++ {
 		for d := 0; d < headDim; d++ {
-			expectedK := float32(100 + g*10 + d)
+			expectedK := float32(100 + h*10 + d)
 			expectedV := expectedK + 1000
 
-			if cache.K.Get([]int{0, g, 0, d}) != expectedK {
+			if cache.K.Get([]int{0, h, 0, d}) != expectedK {
 				t.Errorf("K cache[0,%d,0,%d] = %f, expected %f",
-					g, d, cache.K.Get([]int{0, g, 0, d}), expectedK)
+					h, d, cache.K.Get([]int{0, h, 0, d}), expectedK)
 			}
-			if cache.V.Get([]int{0, g, 0, d}) != expectedV {
+			if cache.V.Get([]int{0, h, 0, d}) != expectedV {
 				t.Errorf("V cache[0,%d,0,%d] = %f, expected %f",
-					g, d, cache.V.Get([]int{0, g, 0, d}), expectedV)
+					h, d, cache.V.Get([]int{0, h, 0, d}), expectedV)
 			}
 		}
 	}
 
 	// Token 1 should be at position 1
-	for g := 0; g < numKVGroups; g++ {
+	for h := 0; h < numHeads; h++ {
 		for d := 0; d < headDim; d++ {
-			expectedK := float32(200 + g*10 + d)
+			expectedK := float32(200 + h*10 + d)
 			expectedV := expectedK + 1000
 
-			if cache.K.Get([]int{0, g, 1, d}) != expectedK {
+			if cache.K.Get([]int{0, h, 1, d}) != expectedK {
 				t.Errorf("K cache[0,%d,1,%d] = %f, expected %f",
-					g, d, cache.K.Get([]int{0, g, 1, d}), expectedK)
+					h, d, cache.K.Get([]int{0, h, 1, d}), expectedK)
 			}
-			if cache.V.Get([]int{0, g, 1, d}) != expectedV {
+			if cache.V.Get([]int{0, h, 1, d}) != expectedV {
 				t.Errorf("V cache[0,%d,1,%d] = %f, expected %f",
-					g, d, cache.V.Get([]int{0, g, 1, d}), expectedV)
+					h, d, cache.V.Get([]int{0, h, 1, d}), expectedV)
 			}
 		}
 	}

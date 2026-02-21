@@ -1,15 +1,15 @@
 // Package tokenizer implements Byte-Pair Encoding (BPE) tokenization
-// compatible with LLaMA 3.
+// compatible with GPT-2.
 //
 // This is an educational implementation focusing on clarity and understanding
 // of the BPE algorithm. It supports training from scratch and loading
-// LLaMA 3 format tokenizer.model files.
+// GPT-2 format tokenizer files.
 //
 // Key features:
 //   - Train BPE vocabulary from text corpus
 //   - Encode/decode text with special token handling
-//   - LLaMA 3 chat format support
-//   - Load/save LLaMA 3 tokenizer.model format
+//   - GPT-2 format support
+//   - Load/save GPT-2 tokenizer format
 package tokenizer
 
 import (
@@ -19,20 +19,18 @@ import (
 	"strings"
 )
 
-// Special token constants for LLaMA 3
+// Special token constants for GPT-2
 const (
-	SpecialBOS         = "<|begin_of_text|>"
-	SpecialEOS         = "<|end_of_text|>"
-	SpecialStartHeader = "<|start_header_id|>"
-	SpecialEndHeader   = "<|end_header_id|>"
-	SpecialEOT         = "<|eot_id|>" // end of turn
-	SpecialEOM         = "<|eom_id|>" // end of message
-	SpecialPythonTag   = "<|python_tag|>"
-	SpecialImage       = "<|image|>"
-	SpecialFinetunePad = "<|finetune_right_pad_id|>"
-	SpecialStepID      = "<|step_id|>"
+	SpecialEndOfText = "<|endoftext|>"
 
-	NumReservedSpecialTokens = 256
+	// GPT-2 vocabulary size is 50257
+	// Token 0-255: single bytes
+	// Token 256-50255: merged tokens
+	// Token 50256: <|endoftext|>
+	GPT2VocabSize    = 50257
+	GPT2EndOfTextID  = 50256
+	NumSpecialTokens = 1 // Only <|endoftext|>
+
 	// Simplified pattern compatible with Go's regexp
 	// Original: (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
 	// Simplified: Handles contractions, words, numbers, punctuation, whitespace
@@ -45,7 +43,7 @@ type Tokenizer struct {
 	// vocab maps token ID to token bytes
 	// Token 0-255: single bytes
 	// Token 256+: merged tokens
-	// Token 128000+: special tokens
+	// Token 50256: <|endoftext|> (GPT-2 style)
 	vocab map[int][]byte
 
 	// inverseVocab maps token string to ID for O(1) lookup
@@ -61,10 +59,7 @@ type Tokenizer struct {
 	// Configuration
 	vocabSize int
 	pattern   *regexp.Regexp
-	bosID     int
 	eosID     int
-	eotID     int
-	eomID     int
 }
 
 // Pair represents two adjacent token IDs
@@ -106,29 +101,13 @@ func (t *Tokenizer) InitializeVocab() {
 	t.vocabSize = 256
 }
 
-// SetSpecialTokens configures special tokens
-// In LLaMA 3, special tokens start at baseVocabSize (128000)
+// SetSpecialTokens configures special tokens for GPT-2.
+// GPT-2 only uses <|endoftext|> as the special token (ID: 50256)
 func (t *Tokenizer) SetSpecialTokens(baseVocabSize int) {
-	// Define special tokens in order
-	specials := []string{
-		SpecialBOS,
-		SpecialEOS,
-		SpecialFinetunePad,
-		SpecialStepID,
-		SpecialStartHeader,
-		SpecialEndHeader,
-		SpecialEOM,
-		SpecialEOT,
-		SpecialPythonTag,
-		SpecialImage,
-	}
+	// GPT-2 only has one special token: <|endoftext|>
+	specials := []string{SpecialEndOfText}
 
-	// Add reserved tokens
-	for i := 0; i < NumReservedSpecialTokens-len(specials); i++ {
-		specials = append(specials, fmt.Sprintf("<|reserved_special_token_%d|>", i))
-	}
-
-	// Assign IDs
+	// Assign IDs - in GPT-2, <|endoftext|> is at position 50256
 	for i, token := range specials {
 		id := baseVocabSize + i
 		t.specialTokens[token] = id
@@ -136,11 +115,8 @@ func (t *Tokenizer) SetSpecialTokens(baseVocabSize int) {
 		t.inverseVocab[token] = id
 	}
 
-	// Store common special token IDs for quick access
-	t.bosID = t.specialTokens[SpecialBOS]
-	t.eosID = t.specialTokens[SpecialEOS]
-	t.eotID = t.specialTokens[SpecialEOT]
-	t.eomID = t.specialTokens[SpecialEOM]
+	// Store the EOS token ID
+	t.eosID = t.specialTokens[SpecialEndOfText]
 }
 
 // VocabSize returns the current vocabulary size
@@ -148,13 +124,14 @@ func (t *Tokenizer) VocabSize() int {
 	return t.vocabSize
 }
 
-// GetBOSID returns the BOS token ID
-func (t *Tokenizer) GetBOSID() int {
-	return t.bosID
+// GetEOSID returns the EOS token ID (<|endoftext|>)
+// Note: GPT-2 uses the same token for both BOS and EOS
+func (t *Tokenizer) GetEOSID() int {
+	return t.eosID
 }
 
-// GetEOSID returns the EOS token ID
-func (t *Tokenizer) GetEOSID() int {
+// GetBOSID returns the BOS token ID (same as EOS in GPT-2)
+func (t *Tokenizer) GetBOSID() int {
 	return t.eosID
 }
 
@@ -257,8 +234,8 @@ func applyMerge(tokenIDs []int, pair Pair, newID int) []int {
 // 4. Iteratively merge most frequent pairs until vocabSize reached
 // 5. Set special tokens
 func (t *Tokenizer) Train(corpus []string, vocabSize int) error {
-	if vocabSize < 256+NumReservedSpecialTokens {
-		return fmt.Errorf("vocabSize must be at least %d", 256+NumReservedSpecialTokens)
+	if vocabSize < 256+NumSpecialTokens {
+		return fmt.Errorf("vocabSize must be at least %d", 256+NumSpecialTokens)
 	}
 
 	// Step 1: Initialize vocabulary
@@ -272,7 +249,7 @@ func (t *Tokenizer) Train(corpus []string, vocabSize int) error {
 	}
 
 	// Step 4: Iteratively merge most frequent pairs
-	targetSize := vocabSize - NumReservedSpecialTokens // Reserve space for special tokens
+	targetSize := vocabSize - NumSpecialTokens // Reserve space for special tokens
 
 	for t.vocabSize < targetSize {
 		// Count all pairs
@@ -315,7 +292,7 @@ func (t *Tokenizer) Train(corpus []string, vocabSize int) error {
 
 	// Step 5: Set special tokens
 	t.SetSpecialTokens(t.vocabSize)
-	t.vocabSize += NumReservedSpecialTokens
+	t.vocabSize += NumSpecialTokens
 
 	fmt.Printf("Training complete. Vocabulary size: %d\n", t.vocabSize)
 	return nil
@@ -391,9 +368,9 @@ type EncodeOptions struct {
 func (t *Tokenizer) Encode(text string, opts EncodeOptions) ([]int, error) {
 	var result []int
 
-	// Add BOS if requested
+	// Add BOS if requested (GPT-2 uses <|endoftext|> as BOS too)
 	if opts.BOS {
-		result = append(result, t.bosID)
+		result = append(result, t.eosID)
 	}
 
 	// Pre-tokenize
@@ -450,8 +427,11 @@ func (t *Tokenizer) Decode(tokenIDs []int) string {
 	for _, id := range tokenIDs {
 		if token, ok := t.vocab[id]; ok {
 			result.Write(token)
+		} else if id >= 0 && id < 256 {
+			// Fallback: treat as single byte even if not in vocab
+			result.WriteByte(byte(id))
 		}
-		// Skip unknown tokens silently
+		// Skip unknown tokens >= 256 silently
 	}
 
 	// Post-process
@@ -463,7 +443,7 @@ func (t *Tokenizer) GetStats() map[string]interface{} {
 	stats := make(map[string]interface{})
 	stats["vocabSize"] = t.vocabSize
 	stats["baseTokens"] = 256
-	stats["mergedTokens"] = t.vocabSize - 256 - NumReservedSpecialTokens
+	stats["mergedTokens"] = t.vocabSize - 256 - NumSpecialTokens
 	stats["specialTokens"] = len(t.specialTokens)
 	stats["numMerges"] = len(t.bpeRanks)
 
@@ -479,7 +459,7 @@ func (t *Tokenizer) PrintTopTokens(n int) {
 	}
 
 	var tokens []tokenInfo
-	for id := 256; id < t.vocabSize-NumReservedSpecialTokens; id++ {
+	for id := 256; id < t.vocabSize-NumSpecialTokens; id++ {
 		if token, ok := t.vocab[id]; ok {
 			tokens = append(tokens, tokenInfo{id, string(token)})
 		}

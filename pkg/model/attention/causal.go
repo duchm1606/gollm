@@ -1,40 +1,47 @@
 // Package attention implements various attention mechanisms for transformer models.
 //
-// This package provides three main attention variants:
+// This package provides attention variants for GPT-2:
 //   - CausalSelfAttention: Basic causal scaled dot-product attention
-//   - MultiHeadAttention: Multi-head attention with RoPE support
-//   - GroupedQueryAttention: Memory-efficient GQA with shared K/V heads
+//   - MultiHeadAttention: Multi-head attention without RoPE (GPT-2 style)
 package attention
 
 import (
 	"fmt"
 	"math"
 
-	"gollm/pkg/model"
 	"gollm/pkg/tensor"
 )
+
+// CausalSelfAttentionConfig holds configuration for CausalSelfAttention.
+type CausalSelfAttentionConfig struct {
+	DIn     int
+	DOut    int
+	Dropout float32
+}
 
 // CausalSelfAttention implements basic causal self-attention.
 //
 // This is the simplest form of attention where each position attends to all
 // previous positions (causal masking). It uses single projection matrices
 // for Query, Key, and Value.
+//
+// GPT-2 uses multi-head attention, but this is kept for educational purposes.
 type CausalSelfAttention struct {
 	WQuery *tensor.Tensor // (d_in, d_out)
 	WKey   *tensor.Tensor // (d_in, d_out)
 	WValue *tensor.Tensor // (d_in, d_out)
 	DOut   int
-	Scale  float32 // 1/sqrt(head_dim)
+	Scale  float32 // 1/sqrt(d_out)
 }
 
 // NewCausalSelfAttention creates a new causal self-attention layer.
-func NewCausalSelfAttention(config model.Config, dIn, dOut int) *CausalSelfAttention {
+func NewCausalSelfAttention(config CausalSelfAttentionConfig) *CausalSelfAttention {
 	return &CausalSelfAttention{
-		WQuery: tensor.NewTensor([]int{dIn, dOut}),
-		WKey:   tensor.NewTensor([]int{dIn, dOut}),
-		WValue: tensor.NewTensor([]int{dIn, dOut}),
-		DOut:   dOut,
-		Scale:  float32(1.0 / math.Sqrt(float64(dOut))),
+		WQuery: tensor.NewTensor([]int{config.DIn, config.DOut}),
+		WKey:   tensor.NewTensor([]int{config.DIn, config.DOut}),
+		WValue: tensor.NewTensor([]int{config.DIn, config.DOut}),
+		DOut:   config.DOut,
+		Scale:  float32(1.0 / math.Sqrt(float64(config.DOut))),
 	}
 }
 

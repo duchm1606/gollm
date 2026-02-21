@@ -4,20 +4,22 @@ import (
 	"math"
 	"testing"
 
-	"gollm/pkg/model"
 	"gollm/pkg/tensor"
 )
 
 // TestCausalSelfAttention_SingleExample tests basic causal attention.
 func TestCausalSelfAttention_SingleExample(t *testing.T) {
 	// Setup
-	config := model.DefaultConfig()
-	dIn, dOut := 64, 64
-	attn := NewCausalSelfAttention(config, dIn, dOut)
+	config := CausalSelfAttentionConfig{
+		DIn:     64,
+		DOut:    64,
+		Dropout: 0.0,
+	}
+	attn := NewCausalSelfAttention(config)
 
 	// Initialize weights with identity-like values for predictable results
-	for i := 0; i < dIn; i++ {
-		for j := 0; j < dOut; j++ {
+	for i := 0; i < config.DIn; i++ {
+		for j := 0; j < config.DOut; j++ {
 			if i == j {
 				attn.WQuery.Set([]int{i, j}, 1.0)
 				attn.WKey.Set([]int{i, j}, 1.0)
@@ -28,22 +30,22 @@ func TestCausalSelfAttention_SingleExample(t *testing.T) {
 
 	// Create input: (batch=1, seq=4, d_in=64)
 	batchSize, seqLen := 1, 4
-	input := tensor.NewTensor([]int{batchSize, seqLen, dIn})
+	input := tensor.NewTensor([]int{batchSize, seqLen, config.DIn})
 	// Fill with simple pattern
 	for s := 0; s < seqLen; s++ {
-		for d := 0; d < dIn; d++ {
+		for d := 0; d < config.DIn; d++ {
 			input.Set([]int{0, s, d}, float32(s+1)*0.1)
 		}
 	}
 
-	// Run forward pass
+	// Run forward pass (CausalSelfAttention doesn't have training parameter)
 	output, err := attn.Forward(input)
 	if err != nil {
 		t.Fatalf("Forward failed: %v", err)
 	}
 
 	// Verify output shape
-	expectedShape := []int{batchSize, seqLen, dOut}
+	expectedShape := []int{batchSize, seqLen, config.DOut}
 	if len(output.Shape) != len(expectedShape) {
 		t.Errorf("Expected shape %v, got %v", expectedShape, output.Shape)
 	}
@@ -61,39 +63,43 @@ func TestCausalSelfAttention_SingleExample(t *testing.T) {
 
 // TestMultiHeadAttention_ParallelHeads tests that multi-head splits work correctly.
 func TestMultiHeadAttention_ParallelHeads(t *testing.T) {
-	config := model.DefaultConfig()
-	config.NumHeads = 4
-	dIn, dOut := 64, 64
+	config := MultiHeadAttentionConfig{
+		NumHeads: 4,
+		DIn:      64,
+		DOut:     64,
+		Dropout:  0.0,
+		QKVBias:  false,
+	}
 
-	attn := NewMultiHeadAttention(config, dIn, dOut)
+	attn := NewMultiHeadAttention(config)
 
 	// Verify head dimensions
-	expectedHeadDim := dOut / config.NumHeads
+	expectedHeadDim := config.DOut / config.NumHeads
 	if attn.HeadDim != expectedHeadDim {
 		t.Errorf("Expected head_dim %d, got %d", expectedHeadDim, attn.HeadDim)
 	}
 
 	// Create input
 	batchSize, seqLen := 2, 8
-	input := tensor.NewTensor([]int{batchSize, seqLen, dIn})
+	input := tensor.NewTensor([]int{batchSize, seqLen, config.DIn})
 
 	// Initialize with pattern
 	for b := 0; b < batchSize; b++ {
 		for s := 0; s < seqLen; s++ {
-			for d := 0; d < dIn; d++ {
+			for d := 0; d < config.DIn; d++ {
 				input.Set([]int{b, s, d}, float32(b*100+s*10+d)*0.01)
 			}
 		}
 	}
 
-	// Run forward
-	output, err := attn.Forward(input, nil, nil)
+	// Run forward (training=false for deterministic testing)
+	output, err := attn.Forward(input, nil, false)
 	if err != nil {
 		t.Fatalf("Forward failed: %v", err)
 	}
 
 	// Verify output shape
-	expectedShape := []int{batchSize, seqLen, dOut}
+	expectedShape := []int{batchSize, seqLen, config.DOut}
 	if len(output.Shape) != len(expectedShape) {
 		t.Errorf("Expected shape %v, got %v", expectedShape, output.Shape)
 	}
@@ -104,51 +110,15 @@ func TestMultiHeadAttention_ParallelHeads(t *testing.T) {
 	}
 }
 
-// TestGroupedQueryAttention_GroupExpansion tests GQA group expansion.
-func TestGroupedQueryAttention_GroupExpansion(t *testing.T) {
-	config := model.DefaultConfig()
-	config.NumHeads = 12
-	config.NumKVGroups = 4
-	dIn, dOut := 768, 768
-
-	attn := NewGroupedQueryAttention(config, dIn, dOut)
-
-	// Verify group size
-	expectedGroupSize := config.NumHeads / config.NumKVGroups
-	if attn.GroupSize != expectedGroupSize {
-		t.Errorf("Expected group_size %d, got %d", expectedGroupSize, attn.GroupSize)
-	}
-
-	// Verify K/V dimensions are smaller
-	expectedKVDim := config.NumKVGroups * (dOut / config.NumHeads)
-	if attn.WKey.Shape[1] != expectedKVDim {
-		t.Errorf("Expected WKey dim %d, got %v", expectedKVDim, attn.WKey.Shape)
-	}
-	if attn.WValue.Shape[1] != expectedKVDim {
-		t.Errorf("Expected WValue dim %d, got %v", expectedKVDim, attn.WValue.Shape)
-	}
-
-	// Test forward pass
-	batchSize, seqLen := 1, 4
-	input := tensor.NewTensor([]int{batchSize, seqLen, dIn})
-
-	output, err := attn.Forward(input, nil, nil)
-	if err != nil {
-		t.Fatalf("Forward failed: %v", err)
-	}
-
-	// Verify output shape
-	expectedShape := []int{batchSize, seqLen, dOut}
-	if len(output.Shape) != len(expectedShape) {
-		t.Errorf("Expected shape %v, got %v", expectedShape, output.Shape)
-	}
-}
-
 // TestAllVariants_ShapeValidation tests shape validation across all variants.
 func TestAllVariants_ShapeValidation(t *testing.T) {
-	config := model.DefaultConfig()
-	config.NumHeads = 4 // Use 4 heads so dOut (64) is divisible
-	dIn, dOut := 64, 64
+	config := MultiHeadAttentionConfig{
+		NumHeads: 4,
+		DIn:      64,
+		DOut:     64,
+		Dropout:  0.0,
+		QKVBias:  false,
+	}
 
 	testCases := []struct {
 		name      string
@@ -157,7 +127,7 @@ func TestAllVariants_ShapeValidation(t *testing.T) {
 	}{
 		{
 			name:      "valid_3d_input",
-			input:     tensor.NewTensor([]int{2, 8, dIn}),
+			input:     tensor.NewTensor([]int{2, 8, config.DIn}),
 			wantError: false,
 		},
 		{
@@ -167,18 +137,23 @@ func TestAllVariants_ShapeValidation(t *testing.T) {
 		},
 		{
 			name:      "2d_input",
-			input:     tensor.NewTensor([]int{8, dIn}),
+			input:     tensor.NewTensor([]int{8, config.DIn}),
 			wantError: true,
 		},
 		{
 			name:      "4d_input",
-			input:     tensor.NewTensor([]int{2, 4, 8, dIn}),
+			input:     tensor.NewTensor([]int{2, 4, 8, config.DIn}),
 			wantError: true,
 		},
 	}
 
 	// Test CausalSelfAttention
-	causal := NewCausalSelfAttention(config, dIn, dOut)
+	causalConfig := CausalSelfAttentionConfig{
+		DIn:     config.DIn,
+		DOut:    config.DOut,
+		Dropout: 0.0,
+	}
+	causal := NewCausalSelfAttention(causalConfig)
 	for _, tc := range testCases {
 		t.Run("Causal_"+tc.name, func(t *testing.T) {
 			_, err := causal.Forward(tc.input)
@@ -192,24 +167,10 @@ func TestAllVariants_ShapeValidation(t *testing.T) {
 	}
 
 	// Test MultiHeadAttention
-	multi := NewMultiHeadAttention(config, dIn, dOut)
+	multi := NewMultiHeadAttention(config)
 	for _, tc := range testCases {
 		t.Run("MultiHead_"+tc.name, func(t *testing.T) {
-			_, err := multi.Forward(tc.input, nil, nil)
-			if tc.wantError && err == nil {
-				t.Errorf("Expected error for %s, got none", tc.name)
-			}
-			if !tc.wantError && err != nil {
-				t.Errorf("Unexpected error for %s: %v", tc.name, err)
-			}
-		})
-	}
-
-	// Test GroupedQueryAttention
-	grouped := NewGroupedQueryAttention(config, dIn, dOut)
-	for _, tc := range testCases {
-		t.Run("Grouped_"+tc.name, func(t *testing.T) {
-			_, err := grouped.Forward(tc.input, nil, nil)
+			_, err := multi.Forward(tc.input, nil, false)
 			if tc.wantError && err == nil {
 				t.Errorf("Expected error for %s, got none", tc.name)
 			}
@@ -222,9 +183,13 @@ func TestAllVariants_ShapeValidation(t *testing.T) {
 
 // TestAllVariants_CausalMasking tests that causal masking is applied correctly.
 func TestAllVariants_CausalMasking(t *testing.T) {
-	config := model.DefaultConfig()
-	config.NumHeads = 4 // Use 4 heads so dOut (64) is divisible
-	dIn, dOut := 64, 64
+	config := MultiHeadAttentionConfig{
+		NumHeads: 4,
+		DIn:      64,
+		DOut:     64,
+		Dropout:  0.0,
+		QKVBias:  false,
+	}
 	batchSize, seqLen := 1, 4
 
 	// Create mask manually
@@ -250,17 +215,17 @@ func TestAllVariants_CausalMasking(t *testing.T) {
 	}
 
 	// Test with MultiHeadAttention
-	multi := NewMultiHeadAttention(config, dIn, dOut)
-	input := tensor.NewTensor([]int{batchSize, seqLen, dIn})
+	multi := NewMultiHeadAttention(config)
+	input := tensor.NewTensor([]int{batchSize, seqLen, config.DIn})
 
 	// Initialize input
 	for s := 0; s < seqLen; s++ {
-		for d := 0; d < dIn; d++ {
+		for d := 0; d < config.DIn; d++ {
 			input.Set([]int{0, s, d}, float32(s+1)*0.1)
 		}
 	}
 
-	output, err := multi.Forward(input, mask, nil)
+	output, err := multi.Forward(input, mask, false)
 	if err != nil {
 		t.Fatalf("Forward with mask failed: %v", err)
 	}
@@ -272,8 +237,6 @@ func TestAllVariants_CausalMasking(t *testing.T) {
 
 // TestScaleValues tests that attention scales are computed correctly.
 func TestScaleValues(t *testing.T) {
-	config := model.DefaultConfig()
-
 	testCases := []struct {
 		dOut     int
 		expected float64
@@ -284,7 +247,12 @@ func TestScaleValues(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		attn := NewCausalSelfAttention(config, tc.dOut, tc.dOut)
+		config := CausalSelfAttentionConfig{
+			DIn:     tc.dOut,
+			DOut:    tc.dOut,
+			Dropout: 0.0,
+		}
+		attn := NewCausalSelfAttention(config)
 		actual := float64(attn.Scale)
 		if math.Abs(actual-tc.expected) > 1e-6 {
 			t.Errorf("dOut=%d: expected scale %v, got %v", tc.dOut, tc.expected, actual)
@@ -292,39 +260,17 @@ func TestScaleValues(t *testing.T) {
 	}
 }
 
-// TestGroupedQueryAttention_MemoryEfficiency tests that GQA uses less memory.
-func TestGroupedQueryAttention_MemoryEfficiency(t *testing.T) {
-	config := model.Config{
-		NumHeads:    12,
-		NumKVGroups: 4,
-		HeadDim:     64,
-	}
-	dIn, dOut := 768, 768
-
-	attn := NewGroupedQueryAttention(config, dIn, dOut)
-
-	// Calculate memory savings
-	mhaKVParams := dOut * dOut                                     // Q/K/V all same size in MHA
-	gqaKVParams := dIn * (config.NumKVGroups * config.HeadDim) * 2 // K and V only
-
-	if gqaKVParams >= mhaKVParams {
-		t.Errorf("GQA should use less memory than MHA")
-	}
-
-	// Group size should be 3 (12 / 4)
-	if attn.GroupSize != 3 {
-		t.Errorf("Expected group_size 3, got %d", attn.GroupSize)
-	}
-}
-
 // BenchmarkCausalSelfAttention benchmarks causal attention.
 func BenchmarkCausalSelfAttention(b *testing.B) {
-	config := model.DefaultConfig()
-	dIn, dOut := 512, 512
-	attn := NewCausalSelfAttention(config, dIn, dOut)
+	config := CausalSelfAttentionConfig{
+		DIn:     512,
+		DOut:    512,
+		Dropout: 0.0,
+	}
+	attn := NewCausalSelfAttention(config)
 
 	batchSize, seqLen := 1, 128
-	input := tensor.NewTensor([]int{batchSize, seqLen, dIn})
+	input := tensor.NewTensor([]int{batchSize, seqLen, config.DIn})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -337,34 +283,21 @@ func BenchmarkCausalSelfAttention(b *testing.B) {
 
 // BenchmarkMultiHeadAttention benchmarks multi-head attention.
 func BenchmarkMultiHeadAttention(b *testing.B) {
-	config := model.DefaultConfig()
-	dIn, dOut := 512, 512
-	attn := NewMultiHeadAttention(config, dIn, dOut)
-
-	batchSize, seqLen := 1, 128
-	input := tensor.NewTensor([]int{batchSize, seqLen, dIn})
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, err := attn.Forward(input, nil, nil)
-		if err != nil {
-			b.Fatal(err)
-		}
+	config := MultiHeadAttentionConfig{
+		NumHeads: 12,
+		DIn:      768,
+		DOut:     768,
+		Dropout:  0.0,
+		QKVBias:  false,
 	}
-}
-
-// BenchmarkGroupedQueryAttention benchmarks GQA.
-func BenchmarkGroupedQueryAttention(b *testing.B) {
-	config := model.DefaultConfig()
-	dIn, dOut := 768, 768
-	attn := NewGroupedQueryAttention(config, dIn, dOut)
+	attn := NewMultiHeadAttention(config)
 
 	batchSize, seqLen := 1, 128
-	input := tensor.NewTensor([]int{batchSize, seqLen, dIn})
+	input := tensor.NewTensor([]int{batchSize, seqLen, config.DIn})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := attn.Forward(input, nil, nil)
+		_, err := attn.Forward(input, nil, false)
 		if err != nil {
 			b.Fatal(err)
 		}

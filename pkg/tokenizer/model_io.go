@@ -49,7 +49,7 @@ func (t *Tokenizer) Save(filepath string) error {
 	}
 
 	var mergedTokens []tokenWithRank
-	for id := 256; id < t.vocabSize-NumReservedSpecialTokens; id++ {
+	for id := 256; id < t.vocabSize-NumSpecialTokens; id++ {
 		if token, ok := t.vocab[id]; ok {
 			// Find the rank for this token
 			// The rank is the order in which it was merged
@@ -187,7 +187,7 @@ func LoadTokenizer(filepath string) (*Tokenizer, error) {
 
 	// Set special tokens
 	tok.SetSpecialTokens(tok.vocabSize)
-	tok.vocabSize += NumReservedSpecialTokens
+	tok.vocabSize += NumSpecialTokens
 
 	return tok, nil
 }
@@ -203,7 +203,7 @@ func (t *Tokenizer) rebuildBpeRanks() {
 	// into two existing tokens with lowest combined IDs
 	// (lower IDs = learned earlier = should merge first)
 
-	for id := 256; id < t.vocabSize-NumReservedSpecialTokens; id++ {
+	for id := 256; id < t.vocabSize-NumSpecialTokens; id++ {
 		token, ok := t.vocab[id]
 		if !ok || len(token) < 2 {
 			continue
@@ -254,7 +254,7 @@ func (t *Tokenizer) GetTokenInfo(id int) (string, error) {
 
 	if id < 256 {
 		info += "Type: Base token (byte)\n"
-	} else if id >= t.vocabSize-NumReservedSpecialTokens {
+	} else if id >= t.vocabSize-NumSpecialTokens {
 		info += "Type: Special token\n"
 	} else {
 		info += "Type: Merged token\n"
@@ -272,13 +272,13 @@ func (t *Tokenizer) PrintVocabInfo() {
 	fmt.Printf("Base tokens: 256\n")
 
 	mergedCount := 0
-	for id := 256; id < t.vocabSize-NumReservedSpecialTokens; id++ {
+	for id := 256; id < t.vocabSize-NumSpecialTokens; id++ {
 		if _, ok := t.vocab[id]; ok {
 			mergedCount++
 		}
 	}
 	fmt.Printf("Merged tokens: %d\n", mergedCount)
-	fmt.Printf("Special tokens: %d\n", NumReservedSpecialTokens)
+	fmt.Printf("Special tokens: %d\n", NumSpecialTokens)
 	fmt.Printf("BPE merge rules: %d\n", len(t.bpeRanks))
 
 	fmt.Println("\n=== Special Token Mapping ===")
@@ -297,7 +297,7 @@ func (t *Tokenizer) PrintVocabInfo() {
 	// Show some merged tokens
 	fmt.Println("\nMerged tokens (first 10):")
 	count := 0
-	for id := 256; id < t.vocabSize-NumReservedSpecialTokens && count < 10; id++ {
+	for id := 256; id < t.vocabSize-NumSpecialTokens && count < 10; id++ {
 		if token, ok := t.vocab[id]; ok {
 			fmt.Printf("  ID %d: %q\n", id, string(token))
 			count++

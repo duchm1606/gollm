@@ -9,6 +9,8 @@
 //   - With cache: O(n) per token (only new position)
 //
 // Where n is the sequence length.
+//
+// This implementation supports standard Multi-Head Attention (MHA) as used in GPT-2.
 package model
 
 import (
@@ -21,52 +23,52 @@ import (
 // Instead of recomputing K and V for all previous tokens at each step,
 // we cache them and only compute for new tokens.
 //
-// Shapes:
-//   - K: (batch, num_kv_groups, cached_len, head_dim)
-//   - V: (batch, num_kv_groups, cached_len, head_dim)
+// Shapes (for standard MHA):
+//   - K: (batch, num_heads, cached_len, head_dim)
+//   - V: (batch, num_heads, cached_len, head_dim)
 type KVCache struct {
-	K           *tensor.Tensor // Shape: (batch, num_kv_groups, max_length, head_dim)
-	V           *tensor.Tensor // Shape: (batch, num_kv_groups, max_length, head_dim)
-	CurrentPos  int            // Next position to write (0 = empty)
-	MaxLength   int            // Maximum cache capacity
-	batchSize   int            // Batch size
-	numKVGroups int            // Number of KV groups
-	headDim     int            // Head dimension
+	K          *tensor.Tensor // Shape: (batch, num_heads, max_length, head_dim)
+	V          *tensor.Tensor // Shape: (batch, num_heads, max_length, head_dim)
+	CurrentPos int            // Next position to write (0 = empty)
+	MaxLength  int            // Maximum cache capacity
+	batchSize  int            // Batch size
+	numHeads   int            // Number of attention heads
+	headDim    int            // Head dimension
 }
 
 // NewKVCache creates a new KV cache with the specified capacity.
 //
 // Parameters:
 //   - batchSize: batch size
-//   - numKVGroups: number of key-value groups (for GQA)
+//   - numHeads: number of attention heads (for standard MHA)
 //   - maxLength: maximum sequence length to cache
 //   - headDim: dimension per attention head
 //
 // Returns:
 //   - Initialized KVCache with pre-allocated tensors
-func NewKVCache(batchSize, numKVGroups, maxLength, headDim int) *KVCache {
-	cacheShape := []int{batchSize, numKVGroups, maxLength, headDim}
+func NewKVCache(batchSize, numHeads, maxLength, headDim int) *KVCache {
+	cacheShape := []int{batchSize, numHeads, maxLength, headDim}
 
 	return &KVCache{
-		K:           tensor.NewTensor(cacheShape),
-		V:           tensor.NewTensor(cacheShape),
-		CurrentPos:  0,
-		MaxLength:   maxLength,
-		batchSize:   batchSize,
-		numKVGroups: numKVGroups,
-		headDim:     headDim,
+		K:          tensor.NewTensor(cacheShape),
+		V:          tensor.NewTensor(cacheShape),
+		CurrentPos: 0,
+		MaxLength:  maxLength,
+		batchSize:  batchSize,
+		numHeads:   numHeads,
+		headDim:    headDim,
 	}
 }
 
 // Update appends new K and V tensors to the cache.
 //
 // Parameters:
-//   - newK: new key tensor, shape: (batch, num_kv_groups, new_tokens, head_dim)
-//   - newV: new value tensor, shape: (batch, num_kv_groups, new_tokens, head_dim)
+//   - newK: new key tensor, shape: (batch, num_heads, new_tokens, head_dim)
+//   - newV: new value tensor, shape: (batch, num_heads, new_tokens, head_dim)
 //
 // Returns:
-//   - Full cached K tensor, shape: (batch, num_kv_groups, CurrentPos, head_dim)
-//   - Full cached V tensor, shape: (batch, num_kv_groups, CurrentPos, head_dim)
+//   - Full cached K tensor, shape: (batch, num_heads, CurrentPos, head_dim)
+//   - Full cached V tensor, shape: (batch, num_heads, CurrentPos, head_dim)
 //   - Error if cache overflow or shape mismatch
 func (c *KVCache) Update(newK, newV *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
 	// Validate input shapes
@@ -77,7 +79,7 @@ func (c *KVCache) Update(newK, newV *tensor.Tensor) (*tensor.Tensor, *tensor.Ten
 
 	// Extract dimensions
 	batchSize := newK.Shape[0]
-	numKVGroups := newK.Shape[1]
+	numHeads := newK.Shape[1]
 	newTokens := newK.Shape[2]
 	headDim := newK.Shape[3]
 
@@ -86,9 +88,9 @@ func (c *KVCache) Update(newK, newV *tensor.Tensor) (*tensor.Tensor, *tensor.Ten
 		return nil, nil, fmt.Errorf("batch size mismatch: expected %d, got %d",
 			c.batchSize, batchSize)
 	}
-	if numKVGroups != c.numKVGroups {
-		return nil, nil, fmt.Errorf("num_kv_groups mismatch: expected %d, got %d",
-			c.numKVGroups, numKVGroups)
+	if numHeads != c.numHeads {
+		return nil, nil, fmt.Errorf("num_heads mismatch: expected %d, got %d",
+			c.numHeads, numHeads)
 	}
 	if headDim != c.headDim {
 		return nil, nil, fmt.Errorf("head_dim mismatch: expected %d, got %d",
@@ -102,27 +104,24 @@ func (c *KVCache) Update(newK, newV *tensor.Tensor) (*tensor.Tensor, *tensor.Ten
 	}
 
 	// Validate newV matches newK shape
-	if newV.Shape[0] != batchSize || newV.Shape[1] != numKVGroups ||
+	if newV.Shape[0] != batchSize || newV.Shape[1] != numHeads ||
 		newV.Shape[2] != newTokens || newV.Shape[3] != headDim {
 		return nil, nil, fmt.Errorf("newK and newV must have same shape, got K=%v, V=%v",
 			newK.Shape, newV.Shape)
 	}
 
 	// Copy new K data into cache at CurrentPos
-	// Stride per token: batchSize * numKVGroups * headDim
-
-	// Copy K values
 	for b := 0; b < batchSize; b++ {
-		for g := 0; g < numKVGroups; g++ {
+		for h := 0; h < numHeads; h++ {
 			for t := 0; t < newTokens; t++ {
 				for d := 0; d < headDim; d++ {
 					// Source index in newK
-					srcIdx := []int{b, g, t, d}
+					srcIdx := []int{b, h, t, d}
 					val := newK.Get(srcIdx)
 
 					// Destination index in cache
 					dstPos := c.CurrentPos + t
-					dstIdx := []int{b, g, dstPos, d}
+					dstIdx := []int{b, h, dstPos, d}
 					c.K.Set(dstIdx, val)
 				}
 			}
@@ -131,16 +130,16 @@ func (c *KVCache) Update(newK, newV *tensor.Tensor) (*tensor.Tensor, *tensor.Ten
 
 	// Copy new V data into cache at CurrentPos
 	for b := 0; b < batchSize; b++ {
-		for g := 0; g < numKVGroups; g++ {
+		for h := 0; h < numHeads; h++ {
 			for t := 0; t < newTokens; t++ {
 				for d := 0; d < headDim; d++ {
 					// Source index in newV
-					srcIdx := []int{b, g, t, d}
+					srcIdx := []int{b, h, t, d}
 					val := newV.Get(srcIdx)
 
 					// Destination index in cache
 					dstPos := c.CurrentPos + t
-					dstIdx := []int{b, g, dstPos, d}
+					dstIdx := []int{b, h, dstPos, d}
 					c.V.Set(dstIdx, val)
 				}
 			}
@@ -151,7 +150,6 @@ func (c *KVCache) Update(newK, newV *tensor.Tensor) (*tensor.Tensor, *tensor.Ten
 	c.CurrentPos += newTokens
 
 	// Return views of the cached data up to CurrentPos
-	// We slice along the sequence dimension (index 2)
 	cachedK := sliceAlongSeqDim(c.K, c.CurrentPos)
 	cachedV := sliceAlongSeqDim(c.V, c.CurrentPos)
 
@@ -159,54 +157,59 @@ func (c *KVCache) Update(newK, newV *tensor.Tensor) (*tensor.Tensor, *tensor.Ten
 }
 
 // sliceAlongSeqDim creates a view of the tensor up to seqLen along dimension 2.
-// The tensor has shape (batch, num_kv_groups, max_length, head_dim).
-// We want to return a view with shape (batch, num_kv_groups, seqLen, head_dim).
-//
-// Since data is stored with head_dim varying fastest, and we want to slice the
-// sequence dimension, we need to compact the data by extracting only the
-// first seqLen positions for each (batch, group) pair.
+// The tensor has shape (batch, num_heads, max_length, head_dim).
+// We want to return a view with shape (batch, num_heads, seqLen, head_dim).
 func sliceAlongSeqDim(t *tensor.Tensor, seqLen int) *tensor.Tensor {
 	batchSize := t.Shape[0]
-	numKVGroups := t.Shape[1]
+	numHeads := t.Shape[1]
 	maxLength := t.Shape[2]
 	headDim := t.Shape[3]
 
 	// Create new shape with the correct sequence length
-	newShape := []int{batchSize, numKVGroups, seqLen, headDim}
+	newShape := []int{batchSize, numHeads, seqLen, headDim}
 
 	// Allocate new data slice for the compacted view
-	newSize := batchSize * numKVGroups * seqLen * headDim
+	newSize := batchSize * numHeads * seqLen * headDim
 	newData := make([]float32, newSize)
 
-	// Copy data: for each (batch, group), copy only the first seqLen positions
+	// Copy data: for each (batch, head), copy only the first seqLen positions
 	for b := 0; b < batchSize; b++ {
-		for g := 0; g < numKVGroups; g++ {
-			// Source offset in original tensor for this (batch, group) pair
-			srcOffset := (b*numKVGroups + g) * maxLength * headDim
+		for h := 0; h < numHeads; h++ {
+			// Source offset in original tensor for this (batch, head) pair
+			srcOffset := ((b*numHeads + h) * maxLength) * headDim
 			// Destination offset in new tensor
-			dstOffset := (b*numKVGroups + g) * seqLen * headDim
+			dstOffset := ((b*numHeads + h) * seqLen) * headDim
 			// Copy seqLen * headDim elements
 			copy(newData[dstOffset:dstOffset+seqLen*headDim], t.Data[srcOffset:srcOffset+seqLen*headDim])
 		}
 	}
 
+	// Compute strides for the new shape
+	strides := make([]int, len(newShape))
+	stride := 1
+	for i := len(newShape) - 1; i >= 0; i-- {
+		strides[i] = stride
+		stride *= newShape[i]
+	}
+
 	// Return a new tensor with its own copy of the data
 	return &tensor.Tensor{
-		Data:  newData,
-		Shape: newShape,
+		Data:    newData,
+		Shape:   newShape,
+		Strides: strides,
 	}
 }
 
 // GetKV returns the cached K and V tensors up to CurrentPos.
 //
 // Returns:
-//   - K tensor, shape: (batch, num_kv_groups, CurrentPos, head_dim)
-//   - V tensor, shape: (batch, num_kv_groups, CurrentPos, head_dim)
+//   - K tensor, shape: (batch, num_heads, CurrentPos, head_dim)
+//   - V tensor, shape: (batch, num_heads, CurrentPos, head_dim)
 //   - seqLen: CurrentPos (length of cached sequence)
 func (c *KVCache) GetKV() (k, v *tensor.Tensor, seqLen int) {
 	if c.CurrentPos == 0 {
 		// Return empty tensors with correct batch and head dimensions
-		emptyShape := []int{c.batchSize, c.numKVGroups, 0, c.headDim}
+		emptyShape := []int{c.batchSize, c.numHeads, 0, c.headDim}
 		return tensor.NewTensor(emptyShape), tensor.NewTensor(emptyShape), 0
 	}
 
@@ -229,7 +232,7 @@ func (c *KVCache) Clear() {
 	}
 }
 
-// GetPosition returns the current cache position (for RoPE offset).
+// GetPosition returns the current cache position (for positional embeddings offset).
 // This is the number of tokens currently cached.
 func (c *KVCache) GetPosition() int {
 	return c.CurrentPos
@@ -244,6 +247,6 @@ func (c *KVCache) GetMaxLength() int {
 // Useful for monitoring memory usage.
 func (c *KVCache) GetCacheSize() int {
 	// Each float32 is 4 bytes
-	elements := c.batchSize * c.numKVGroups * c.MaxLength * c.headDim
+	elements := c.batchSize * c.numHeads * c.MaxLength * c.headDim
 	return elements * 4 * 2 // K and V
 }
